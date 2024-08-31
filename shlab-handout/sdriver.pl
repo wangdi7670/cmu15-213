@@ -110,81 +110,81 @@ while (<INFILE>) {
 
     # Comment line
     if ($line =~ /^#/) {  
-	print "$line\n";
+	    print "$line\n";
     }
 
     # Blank line
     elsif ($line =~ /^\s*$/) { 
-	if ($verbose) {
-	    print "$0: Ignoring blank line\n";
-	}
+        if ($verbose) {
+            print "$0: Ignoring blank line\n";
+        }
     }
 
     # Send SIGTSTP (ctrl-z)
     elsif ($line =~ /TSTP/) {
-	if ($verbose) {
-	    print "$0: Sending SIGTSTP signal to process $pid\n";
-	}
-	kill 'TSTP', $pid;
+        if ($verbose) {
+            print "$0: Sending SIGTSTP signal to process $pid\n";
+        }
+        kill 'TSTP', $pid;
     }
 
     # Send SIGINT (ctrl-c)
     elsif ($line =~ /INT/) {
-	if ($verbose) {
-	    print "$0: Sending SIGINT signal to process $pid\n";
-	}
-	kill 'INT', $pid;
+        if ($verbose) {
+            print "$0: Sending SIGINT signal to process $pid\n";
+        }
+        kill 'INT', $pid;
     }
 
     # Send SIGQUIT (whenever we need graceful termination)
     elsif ($line =~ /QUIT/) {
-	if ($verbose) {
-	    print "$0: Sending SIGQUIT signal to process $pid\n";
-	}
-	kill 'QUIT', $pid;
+        if ($verbose) {
+            print "$0: Sending SIGQUIT signal to process $pid\n";
+        }
+        kill 'QUIT', $pid;
     }
 
     # Send SIGKILL 
     elsif ($line =~ /KILL/) {
-	if ($verbose) {
-	    print "$0: Sending SIGKILL signal to process $pid\n";
-	}
-	kill 'KILL', $pid;
+        if ($verbose) {
+            print "$0: Sending SIGKILL signal to process $pid\n";
+        }
+        kill 'KILL', $pid;
     }
 
     # Close pipe (sends EOF notification to child)
     elsif ($line =~ /CLOSE/) {
-	if ($verbose) {
-	    print "$0: Closing output end of pipe to child $pid\n";
-	}
-	close Writer;
+        if ($verbose) {
+            print "$0: Closing output end of pipe to child $pid\n";
+        }
+        close Writer;
     }
 
     # Wait for child to terminate
     elsif ($line =~ /WAIT/) {
-	if ($verbose) {
-	    print "$0: Waiting for child $pid\n";
-	}
-	wait;
-	if ($verbose) {
-	    print "$0: Child $pid reaped\n";
-	}
+        if ($verbose) {
+            print "$0: Waiting for child $pid\n";
+        }
+        wait;
+        if ($verbose) {
+            print "$0: Child $pid reaped\n";
+        }
     }
 
     # Sleep
     elsif ($line =~ /SLEEP (\d+)/) {
-	if ($verbose) {
-	    print "$0: Sleeping $1 secs\n";
-	}
-	sleep $1;
+        if ($verbose) {
+            print "$0: Sleeping $1 secs\n";
+        }
+        sleep $1;
     }
 
     # Unknown input
     else {
-	if ($verbose) {
-	    print "$0: Sending :$line: to child $pid\n";
-	}
-	print Writer "$line\n";
+        if ($verbose) {
+            print "$0: Sending :$line: to child $pid\n";
+        }
+        print Writer "$line\n";
     }
 }
 
