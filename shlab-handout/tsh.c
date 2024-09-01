@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <assert.h>
 
 /* Misc manifest constants */
 #define MAXLINE    1024   /* max line size */
@@ -38,9 +39,10 @@
 /* Global variables */
 extern char **environ;      /* defined in libc */
 char prompt[] = "tsh> ";    /* command line prompt (DO NOT CHANGE) */
-int verbose = 0;            /* if true, print additional output */
-int nextjid = 1;            /* next job ID to allocate */
+int g_verbose = 0;            /* if true, print additional output */
+int g_nextjid = 1;            /* next job ID to allocate */
 char sbuf[MAXLINE];         /* for composing sprintf messages */
+volatile sig_atomic_t g_fgPid = 0;  /* forground process pid */
 
 struct job_t {              /* The job struct */
     pid_t pid;              /* job PID */
@@ -85,6 +87,9 @@ void app_error(char *msg);
 typedef void handler_t(int);
 handler_t *Signal(int signum, handler_t *handler);
 
+static void BlockAllSignal(sigset_t *prev);
+static void RestoreSig(sigset_t *prev);
+
 /*
  * main - The shell's main routine 
  */
@@ -105,7 +110,7 @@ int main(int argc, char **argv)
                 usage();
                 break;
             case 'v': /* emit additional diagnostic info */
-                verbose = 1;
+                g_verbose = 1;
                 break;
             case 'p':            /* don't print a prompt */
                 emit_prompt = 0; /* handy for automatic testing */
@@ -168,7 +173,6 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
-    // printf("cmd line = %s\n", cmdline);
     size_t size = strlen(cmdline);
     if (size == 0) {
         return;
@@ -181,18 +185,43 @@ void eval(char *cmdline)
         return;
     }
 
+    sigset_t mask;
+    sigset_t prev;
+    if (sigemptyset(&mask) < 0) {
+        unix_error("sigemptyset failed");
+    }
+    if (sigaddset(&mask, SIGCHLD) < 0) {
+        unix_error("sigaddset failed");
+    }
+    if (sigprocmask(SIG_BLOCK, &mask, &prev) < 0) {  /* block SIGCHLD */
+        unix_error("sigprocmask failed");
+    }
+
+
     pid_t pid;
     if ((pid = fork()) == -1) {
         unix_error("fork failed");
     }
 
-    if (pid == 0) {  // child
-        execl(argv[0], argv[1]);
-    } else {         // parent
-        wait(NULL);
+    if (pid == 0) {   /* child */ 
+        RestoreSig(&prev);  /* unblock SIGCHLD */
+        if (execvp(argv[0], argv) == -1) {
+            unix_error("execvp failed");
+        }
+    } else {         /* parent */
+        if (isBackground) {
+            addjob(jobs, pid, BG, cmdline);
+            struct job_t *bgJob = getjobpid(jobs, pid);
+            printf("[%d] (%d) %s", bgJob->jid, bgJob->pid, bgJob->cmdline);
+        } else {
+            addjob(jobs, pid, FG, cmdline);
+            g_fgPid = 0;
+            while (!g_fgPid) {
+                sigsuspend(&prev);
+            }
+        }
+        RestoreSig(&prev);  /* unblock SIGCHLD */
     }
-
-    return;
 }
 
 /* 
@@ -298,6 +327,39 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+    if (g_verbose) {
+        printf("enter sigchld_handler\n");
+    }
+
+    sigset_t prev;
+    BlockAllSignal(&prev);
+    int olderrno = errno;
+
+    int status;
+    pid_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+        struct job_t *job = getjobpid(jobs, pid);
+        assert(job != NULL);
+        if (job->state == FG) {
+            g_fgPid = job->pid;
+        }
+
+        if (WIFSTOPPED(status)) {  /* stopped */
+            job->state = ST;
+        } else if (WIFEXITED(status)) {  /* zombie */
+            int res = deletejob(jobs, job->pid);
+            assert(res == 1);
+        } else {
+            printf("It is not possible\n");
+        }
+    }
+    if (pid < 0 && errno != ECHILD) {
+        perror("sigchld_handler end");
+    }
+
+    errno = olderrno;
+    RestoreSig(&prev);
     return;
 }
 
@@ -308,6 +370,26 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+    if (g_verbose) {
+        printf("enter sigint_handler\n");
+    }
+
+    int olderrno = errno;
+    pid_t pid = fgpid(jobs);
+    if (pid == 0) {
+        return;
+    }
+
+    if (kill(-pid, SIGINT) < 0) {
+        unix_error("kill SIGINT failed");
+    }
+
+    waitpid(pid, NULL, 0);
+
+    int res = deletejob(jobs, pid);
+    assert(res == 1);
+
+    errno = olderrno;
     return;
 }
 
@@ -318,6 +400,21 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+    if (g_verbose) {
+        printf("enter sigstp_handler\n");
+    }
+
+    int olderrno = errno;
+
+    pid_t pid = fgpid(jobs);
+    struct job_t *job = getjobpid(jobs, pid);
+    assert(job != NULL);
+    job->state = BG;
+    if (kill(-pid, SIGTSTP) < 0) {
+        unix_error("kill SIGTSTP failed");
+    }
+
+    errno = olderrno;
     return;
 }
 
@@ -363,19 +460,21 @@ int maxjid(struct job_t *jobs)
 int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline) 
 {
     int i;
-    
-    if (pid < 1)
-	return 0;
+
+    if (pid < 1) {
+        return 0;
+    }
 
     for (i = 0; i < MAXJOBS; i++) {
         if (jobs[i].pid == 0) {
             jobs[i].pid = pid;
             jobs[i].state = state;
-            jobs[i].jid = nextjid++;
-            if (nextjid > MAXJOBS)
-                nextjid = 1;
+            jobs[i].jid = g_nextjid++;
+            if (g_nextjid > MAXJOBS) {
+                g_nextjid = 1;
+            }
             strcpy(jobs[i].cmdline, cmdline);
-            if(verbose) {
+            if(g_verbose) {
                 printf("Added job [%d] %d %s\n", jobs[i].jid, jobs[i].pid, jobs[i].cmdline);
             }
             return 1;
@@ -396,7 +495,7 @@ int deletejob(struct job_t *jobs, pid_t pid)
     for (i = 0; i < MAXJOBS; i++) {
         if (jobs[i].pid == pid) {
             clearjob(&jobs[i]);
-            nextjid = maxjid(jobs)+1;
+            g_nextjid = maxjid(jobs)+1;
             return 1;
         }
     }
@@ -407,9 +506,11 @@ int deletejob(struct job_t *jobs, pid_t pid)
 pid_t fgpid(struct job_t *jobs) {
     int i;
 
-    for (i = 0; i < MAXJOBS; i++)
-	if (jobs[i].state == FG)
-	    return jobs[i].pid;
+    for (i = 0; i < MAXJOBS; i++) {
+        if (jobs[i].state == FG) {
+            return jobs[i].pid;
+        }
+    }
     return 0;
 }
 
@@ -417,11 +518,15 @@ pid_t fgpid(struct job_t *jobs) {
 struct job_t *getjobpid(struct job_t *jobs, pid_t pid) {
     int i;
 
-    if (pid < 1)
-	return NULL;
-    for (i = 0; i < MAXJOBS; i++)
-	if (jobs[i].pid == pid)
-	    return &jobs[i];
+    if (pid < 1) {
+        return NULL;
+    }
+
+    for (i = 0; i < MAXJOBS; i++) {
+        if (jobs[i].pid == pid) {
+            return &jobs[i];
+        }
+    }
     return NULL;
 }
 
@@ -430,11 +535,15 @@ struct job_t *getjobjid(struct job_t *jobs, int jid)
 {
     int i;
 
-    if (jid < 1)
-	return NULL;
-    for (i = 0; i < MAXJOBS; i++)
-	if (jobs[i].jid == jid)
-	    return &jobs[i];
+    if (jid < 1) {
+	    return NULL;
+    }
+    
+    for (i = 0; i < MAXJOBS; i++) {
+        if (jobs[i].jid == jid) {
+            return &jobs[i];
+        }
+    }
     return NULL;
 }
 
@@ -443,8 +552,10 @@ int pid2jid(pid_t pid)
 {
     int i;
 
-    if (pid < 1)
-	return 0;
+    if (pid < 1) {
+	    return 0;
+    }
+
     for (i = 0; i < MAXJOBS; i++) {
         if (jobs[i].pid == pid) {
             return jobs[i].jid;
@@ -543,5 +654,23 @@ void sigquit_handler(int sig)
     exit(1);
 }
 
+static void BlockAllSignal(sigset_t *prev)
+{
+    assert(prev != NULL);
+    sigset_t mask;
+    if (sigfillset(&mask) < 0) {
+        unix_error("sigfillset failed");
+    }
 
+    if (sigprocmask(SIG_SETMASK, &mask, prev) < 0) {
+        unix_error("sigprocmask failed");
+    }
+}
 
+static void RestoreSig(sigset_t *prev)
+{
+    assert(prev != NULL);
+    if (sigprocmask(SIG_SETMASK, prev, NULL) < 0) {
+        unix_error("sigprocmask failed");
+    }
+}
