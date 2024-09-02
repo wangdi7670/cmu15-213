@@ -42,7 +42,7 @@ char prompt[] = "tsh> ";    /* command line prompt (DO NOT CHANGE) */
 int g_verbose = 0;            /* if true, print additional output */
 int g_nextjid = 1;            /* next job ID to allocate */
 char sbuf[MAXLINE];         /* for composing sprintf messages */
-volatile sig_atomic_t g_fgPid = 0;  /* forground process pid */
+volatile sig_atomic_t g_fgPid = 0;  /* just terminated forground process pid, used for sync */
 
 struct job_t {              /* The job struct */
     pid_t pid;              /* job PID */
@@ -204,6 +204,7 @@ void eval(char *cmdline)
     }
 
     if (pid == 0) {   /* child */ 
+        setpgid(0, 0);
         RestoreSig(&prev);  /* unblock SIGCHLD */
         if (execvp(argv[0], argv) == -1) {
             unix_error("execvp failed");
@@ -217,7 +218,9 @@ void eval(char *cmdline)
             addjob(jobs, pid, FG, cmdline);
             g_fgPid = 0;
             while (!g_fgPid) {
+                if (g_verbose) { printf("before sigsuspend\n"); }
                 sigsuspend(&prev);
+                if (g_verbose) { printf("after sigsuspend\n"); }
             }
         }
         RestoreSig(&prev);  /* unblock SIGCHLD */
@@ -311,7 +314,19 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-    return;
+    while (1) {
+        /* block all signals for protecting "jobs" */
+        sigset_t prev;
+        BlockAllSignal(&prev);
+        pid_t fgPid = fgpid(jobs);
+        RestoreSig(&prev);
+
+        if (fgPid == pid) {
+            sleep(1);
+        } else {
+            break;
+        }
+    }
 }
 
 /*****************
@@ -347,11 +362,27 @@ void sigchld_handler(int sig)
 
         if (WIFSTOPPED(status)) {  /* stopped */
             job->state = ST;
-        } else if (WIFEXITED(status)) {  /* zombie */
+            if (g_verbose) {
+                printf("pid[%d] is stopped, signal num = %d\n", pid, WSTOPSIG(status));
+            }
+        } 
+        if (WIFEXITED(status)) {  /* child process is terminated because exit or return */
             int res = deletejob(jobs, job->pid);
             assert(res == 1);
-        } else {
-            printf("It is not possible\n");
+        }
+        if (WIFSIGNALED(status)) {  /* child process is terminated because signal */
+            if (WTERMSIG(status) == SIGINT) {
+                if (g_verbose) {
+                    printf("pid[%d] receive SIGINT\n", pid);
+                }
+                int res = deletejob(jobs, job->pid);
+                assert(res == 1);
+            } else {
+                printf("It is imposible, pid[%d] receive %d\n", pid, WTERMSIG(status));
+            }
+        }
+        if (WIFCONTINUED(status)) {
+            printf("It is impossible\n");
         }
     }
     if (pid < 0 && errno != ECHILD) {
@@ -360,6 +391,10 @@ void sigchld_handler(int sig)
 
     errno = olderrno;
     RestoreSig(&prev);
+
+    if (g_verbose) {
+        printf("leave sigchld_handler\n");
+    }
     return;
 }
 
@@ -375,7 +410,12 @@ void sigint_handler(int sig)
     }
 
     int olderrno = errno;
+
+    /* block all signals for protecting "jobs" */
+    sigset_t prev;
+    BlockAllSignal(&prev);
     pid_t pid = fgpid(jobs);
+    RestoreSig(&prev);
     if (pid == 0) {
         return;
     }
@@ -384,12 +424,12 @@ void sigint_handler(int sig)
         unix_error("kill SIGINT failed");
     }
 
-    waitpid(pid, NULL, 0);
-
-    int res = deletejob(jobs, pid);
-    assert(res == 1);
+    waitfg(pid);
 
     errno = olderrno;
+    if (g_verbose) {
+        printf("leave sigint_handler\n");
+    }
     return;
 }
 
