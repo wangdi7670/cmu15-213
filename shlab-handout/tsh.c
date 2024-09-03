@@ -362,9 +362,7 @@ void sigchld_handler(int sig)
 
         if (WIFSTOPPED(status)) {  /* stopped */
             job->state = ST;
-            if (g_verbose) {
-                printf("pid[%d] is stopped, signal num = %d\n", pid, WSTOPSIG(status));
-            }
+            printf("Job [%d] (%d) stopped by signal %d\n", job->jid, pid, WSTOPSIG(status));
         } 
         if (WIFEXITED(status)) {  /* child process is terminated because exit or return */
             int res = deletejob(jobs, job->pid);
@@ -372,9 +370,7 @@ void sigchld_handler(int sig)
         }
         if (WIFSIGNALED(status)) {  /* child process is terminated because signal */
             if (WTERMSIG(status) == SIGINT) {
-                if (g_verbose) {
-                    printf("pid[%d] receive SIGINT\n", pid);
-                }
+                printf("Job [%d] (%d) terminated by signal %d\n", job->jid, job->pid, SIGINT);
                 int res = deletejob(jobs, job->pid);
                 assert(res == 1);
             } else {
@@ -416,7 +412,9 @@ void sigint_handler(int sig)
     BlockAllSignal(&prev);
     pid_t pid = fgpid(jobs);
     RestoreSig(&prev);
+
     if (pid == 0) {
+        errno = olderrno;
         return;
     }
 
@@ -424,7 +422,10 @@ void sigint_handler(int sig)
         unix_error("kill SIGINT failed");
     }
 
-    waitfg(pid);
+    /* It does not need to wait here, because shell will use sigsuspend() to wait.
+     * but calling waitfg here we will see that sigint_handler will be interupted by sigchld_handler
+     */
+    // waitfg(pid);
 
     errno = olderrno;
     if (g_verbose) {
@@ -445,15 +446,26 @@ void sigtstp_handler(int sig)
     }
 
     int olderrno = errno;
+    sigset_t prev;
+    BlockAllSignal(&prev);
 
     pid_t pid = fgpid(jobs);
     struct job_t *job = getjobpid(jobs, pid);
-    assert(job != NULL);
-    job->state = BG;
+
+    if (job == NULL) {
+        RestoreSig(&prev);
+        errno = olderrno;
+        return;
+    }
+
     if (kill(-pid, SIGTSTP) < 0) {
         unix_error("kill SIGTSTP failed");
     }
 
+    if (g_verbose) {
+        printf("leave sigstp_handler\n");
+    }
+    RestoreSig(&prev);
     errno = olderrno;
     return;
 }
