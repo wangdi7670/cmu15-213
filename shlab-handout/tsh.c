@@ -206,8 +206,12 @@ void eval(char *cmdline)
     if (pid == 0) {   /* child */ 
         setpgid(0, 0);
         RestoreSig(&prev);  /* unblock SIGCHLD */
-        if (execvp(argv[0], argv) == -1) {
-            unix_error("execvp failed");
+
+        if (execve(argv[0], argv, environ) == -1) {
+            size_t len = strlen(cmdline);
+            cmdline[len - 1] = '\0';
+            printf("%s: Command not found\n", cmdline);
+            exit(0);
         }
     } else {         /* parent */
         if (isBackground) {
@@ -290,10 +294,17 @@ int builtin_cmd(char **argv)
 {
     if (strcmp(argv[0], "quit") == 0) {
         exit(0);
-    } else if (strcmp(argv[0], "jobs") == 0) {
+    } 
+
+    if (strcmp(argv[0], "jobs") == 0) {
+        sigset_t prev;
+        BlockAllSignal(&prev);
         listjobs(jobs);
+        RestoreSig(&prev);
         return 1;
-    } else if (strcmp(argv[0], "bg") == 0 || strcmp(argv[0], "fg") == 0) {
+    }
+    
+    if (strcmp(argv[0], "bg") == 0 || strcmp(argv[0], "fg") == 0) {
         do_bgfg(argv);
         return 1;
     } 
@@ -306,6 +317,78 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+    sigset_t prev;
+    BlockAllSignal(&prev);
+
+    if (argv[1] == NULL) {
+        printf("%s command requires PID or %%jobid\n", argv[0]);
+        goto EXIT;
+    }
+
+    char *jid_arg = argv[1];
+    if (*jid_arg != '%' && (*jid_arg > '9' || *jid_arg < '0')) {
+        printf("%s command requires PID or %%jobid\n", argv[0]);
+        goto EXIT;
+    }
+
+    for (char *temp = jid_arg + 1; *temp != '\0'; ++temp) {
+        if (*temp > '9' || *temp < '0') {
+            printf("%s command requires PID or %%jobid\n", argv[0]);
+            goto EXIT;
+        }
+    }
+
+    char type[64] = {0};
+    if (*jid_arg == '%') {
+        strcpy(type, "job");
+    } else {
+        strcpy(type, "process");
+    }
+
+    int jid = atoi(argv[1] + 1);
+    struct job_t *job = getjobjid(jobs, jid);
+    if (job == NULL) {
+        printf("(%s) No such %s\n", argv[1], type);
+        goto EXIT;
+    }
+    pid_t pid = job->pid;
+
+    assert(job->state != FG);
+
+    /* bg command */
+    if (strcmp("bg", argv[0]) == 0) {
+        if (job->state == BG) {
+            printf("job %d already in background\n", jid);
+            goto EXIT;
+        }
+
+        assert(job->state == ST);
+        job->state = BG;
+        if (kill(-pid, SIGCONT) < 0) {
+            unix_error("kill faild");
+        }
+        printf("[%d] (%d) %s", jid, pid, job->cmdline);
+        goto EXIT;
+    }
+
+    /* fg command */
+    assert(strcmp("fg", argv[0]) == 0);
+    assert(job->state == ST || job->state == BG);
+    if (job->state == ST) {
+        if (kill(-pid, SIGCONT) < 0) {
+            unix_error("kill faild");
+        }
+    }
+
+    job->state = FG;
+
+    g_fgPid = 0;
+    while (!g_fgPid) {
+        sigsuspend(&prev);
+    }
+
+EXIT:
+    RestoreSig(&prev);
     return;
 }
 
@@ -353,7 +436,7 @@ void sigchld_handler(int sig)
     int status;
     pid_t pid;
 
-    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0) {
         struct job_t *job = getjobpid(jobs, pid);
         assert(job != NULL);
         if (job->state == FG) {
@@ -369,16 +452,12 @@ void sigchld_handler(int sig)
             assert(res == 1);
         }
         if (WIFSIGNALED(status)) {  /* child process is terminated because signal */
-            if (WTERMSIG(status) == SIGINT) {
-                printf("Job [%d] (%d) terminated by signal %d\n", job->jid, job->pid, SIGINT);
-                int res = deletejob(jobs, job->pid);
-                assert(res == 1);
-            } else {
-                printf("It is imposible, pid[%d] receive %d\n", pid, WTERMSIG(status));
-            }
+            int res = deletejob(jobs, job->pid);
+            assert(res == 1);
+            printf("Job [%d] (%d) terminated by signal %d\n", job->jid, job->pid, WTERMSIG(status));
         }
         if (WIFCONTINUED(status)) {
-            printf("It is impossible\n");
+            printf("Job [%d] (%d) received signal SIGCONT\n", job->jid, job->pid);
         }
     }
     if (pid < 0 && errno != ECHILD) {
