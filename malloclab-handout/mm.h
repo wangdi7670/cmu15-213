@@ -21,3 +21,59 @@ typedef struct {
 
 extern team_t team;
 
+#define WSIZE 4
+#define DSIZE 8
+#define CHUNK_SIZE (1 << 12)  // 4KB
+#define MAX_UINT_32 (~0)
+
+static inline unsigned int MaxSize(unsigned int size1, unsigned int size2)
+{
+    return size1 > size2 ? size1 : size2;
+}
+
+/**
+ * @param alloc: 1 or 0
+ */
+static inline unsigned int Pack(unsigned int size, unsigned int alloc)
+{
+    return size | alloc;
+}
+
+static inline void Put(void *ptr, unsigned int val)
+{
+    *(unsigned int *)(ptr) = val;
+}
+
+static inline void *GetHeaderPtr(void *bp)
+{
+    return (void *)((char *)bp - WSIZE);
+}
+
+static inline size_t GetSize(void *bp)
+{
+    void *header = GetHeaderPtr(bp);
+    return *(unsigned *)header & (~7);
+}
+
+static inline void *GetFooterPtr(void *bp) 
+{
+    return (void *)((char *)bp + GetSize(bp) - DSIZE);
+}
+
+static inline int GetAlloc(void *bp)
+{
+    void *header = GetHeaderPtr(bp);
+    return *(unsigned *)header & 1;
+}
+
+static inline void *NextBlockPtr(void *bp)
+{
+    size_t size = GetSize(bp);
+    return (void *)((char *)bp + size);
+}
+
+static inline void *PrevBlockPtr(void *bp)
+{
+    unsigned int prevSize = *(unsigned int *)((char *)bp - DSIZE) & (~7);
+    return (void *)((char *)bp - prevSize);
+}
