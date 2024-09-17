@@ -45,16 +45,24 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-static void *g_heapList;
-static int g_debug = 1;
+static void *g_heapList = NULL;
+static void *g_epilogue = NULL;
 
-static void *PrintLog(char *info)
+static void mm_check()
 {
-    if (g_debug) {
-        fprintf(stderr, info);
+    if (g_heapList != NULL) {
+        assert(g_heapList > mem_heap_lo());
+        assert(g_heapList < mem_heap_hi());
+        assert(*(unsigned int *)GetHeaderPtr(g_heapList) == 9);  // 0b1001
+        assert(*(unsigned int *)GetFooterPtr(g_heapList) == 9);  // 0b1001
+    }
+
+    if (g_epilogue != NULL) {
+        assert(g_epilogue > mem_heap_lo());
+        assert(g_epilogue < mem_heap_hi());
+        assert(*(unsigned int *)g_epilogue == 1);
     }
 }
-
 
 /* 
  * mm_init - initialize the malloc package.
@@ -72,6 +80,8 @@ int mm_init(void)
     Put(p + 3 * WSIZE, Pack(0, 1));
 
     g_heapList = p + 2 * WSIZE;
+    g_epilogue = p + 3 * WSIZE;
+    mm_check();
     return 0;
 }
 
@@ -111,12 +121,13 @@ static void Place(void *bp, int newsize)
         Put(GetHeaderPtr(bp), Pack(newsize, 1));
         Put(GetFooterPtr(bp), Pack(newsize, 1));
     }
+    mm_check();
 }
 
 static void *Coalesce(void *bp)
 {
     void *prevBp = PrevBlockPtr(bp);
-    int prevAlloc = GetAlloc(prevAlloc);
+    int prevAlloc = GetAlloc(prevBp);
     void *nextBp = NextBlockPtr(bp);
     int nextAlloc = GetAlloc(nextBp);
 
@@ -132,6 +143,7 @@ static void *Coalesce(void *bp)
 
         Put(GetHeaderPtr(prevBp), Pack(curSize + prevSize, 0));
         Put(GetFooterPtr(prevBp), Pack(curSize + prevSize, 0));
+        mm_check();
         return prevBp;
     }
 
@@ -141,6 +153,7 @@ static void *Coalesce(void *bp)
 
         Put(GetHeaderPtr(bp), Pack(curSize + nextSize, 0));
         Put(GetFooterPtr(bp), Pack(curSize + nextSize, 0));
+        mm_check();
         return bp;
     }
 
@@ -155,6 +168,7 @@ static void *Coalesce(void *bp)
     unsigned int newSize = curSize + prevSize + nextSize;
     Put(GetHeaderPtr(prevBp), Pack(newSize, 0));
     Put(GetFooterPtr(prevBp), Pack(newSize, 0));
+    mm_check();
     return prevBp;
 }
 
@@ -168,8 +182,11 @@ static void *ExtendHeap(int size)
 
     Put(GetHeaderPtr(p), Pack(size, 0));
     Put(GetFooterPtr(p), Pack(size, 0));
-    Put(GetHeaderPtr(NextBlockPtr(p)), Pack(0, 1));  // new epilogue-block
 
+    g_epilogue = GetHeaderPtr(NextBlockPtr(p));
+    Put(g_epilogue, Pack(0, 1));  // new epilogue-block
+
+    mm_check();
     return Coalesce(p);
 }
 
@@ -180,7 +197,7 @@ static void *ExtendHeap(int size)
 void *mm_malloc(size_t size)
 {
     if (size <= 0) {
-        PrintLog("size is invalid\n");
+        printf("size is invalid\n");
         return NULL;
     }
     int newsize = ALIGN(size + SIZE_T_SIZE);
@@ -236,6 +253,7 @@ void mm_free(void *ptr)
     if (success == 0) {
         fprintf(stderr, "ptr(%p) is invalid", ptr);
     }
+    mm_check();
 }
 
 /**
@@ -259,24 +277,59 @@ static void *DoRealloc(void *ptr, size_t size)
 
         Put(GetHeaderPtr(NextBlockPtr(ptr)), Pack(leftSize, 0));
 
+        mm_check();
         Coalesce(NextBlockPtr(ptr));
         return ptr;
     }
 
-    size_t extraSize = newSize - oldSize;
+    size_t needExtraSize = newSize - oldSize;
+
     void *nextBlockPtr = NextBlockPtr(ptr);
     int nextAlloc = GetAlloc(nextBlockPtr);
     size_t nextSize = GetSize(nextBlockPtr);
 
-    /* if next block is not allocated and enough to accomodate extraSize, use it directly */
-    if (nextAlloc == 0 && nextSize >= extraSize) {
-        Put(GetFooterPtr(nextBlockPtr), Pack(nextSize - extraSize, 0));
+    /* if next block is not allocated and enough to accomodate needExtraSize, use it directly */
+    if (nextAlloc == 0 && nextSize >= needExtraSize) {
+        if (nextSize == needExtraSize) {
+            Put(GetHeaderPtr(ptr), Pack(newSize, 1));
+            Put(GetFooterPtr(ptr), Pack(newSize, 1));
+        } else {
+            Put(GetFooterPtr(nextBlockPtr), Pack(nextSize - needExtraSize, 0));
 
-        Put(GetHeaderPtr(ptr), Pack(newSize, 1));
-        Put(GetFooterPtr(ptr), Pack(newSize, 1));
+            Put(GetHeaderPtr(ptr), Pack(newSize, 1));
+            Put(GetFooterPtr(ptr), Pack(newSize, 1));
 
-        Put(GetHeaderPtr(NextBlockPtr(ptr)), Pack(nextSize - extraSize, 0));
+            Put(GetHeaderPtr(NextBlockPtr(ptr)), Pack(nextSize - needExtraSize, 0));
+        }
+        mm_check();
         return ptr;
+    }
+
+    void *prevBlockPtr = PrevBlockPtr(ptr);
+    int prevAlloc = GetAlloc(prevBlockPtr);
+    size_t prevSize = GetSize(prevBlockPtr);
+
+    /* if prev block is not allocated and enough to accomodate needExtraSize, merge prev directly */
+    if (prevAlloc == 0 && prevSize >= needExtraSize) {
+        size_t copySize = oldSize - SIZE_T_SIZE;
+        char temp[copySize];
+        memcpy(temp, ptr, copySize);
+
+        if (prevSize == needExtraSize) {
+            Put(GetHeaderPtr(prevBlockPtr), Pack(newSize, 1));
+            Put(GetFooterPtr(prevBlockPtr), Pack(newSize, 1));
+        } else {
+            Put(GetFooterPtr(ptr), Pack(prevSize + oldSize - newSize, 0));
+
+            Put(GetHeaderPtr(prevBlockPtr), Pack(newSize, 1));
+            Put(GetFooterPtr(prevBlockPtr), Pack(newSize, 1));
+
+            Put(GetHeaderPtr(NextBlockPtr(prevBlockPtr)), Pack(prevSize + oldSize - newSize, 0));
+        }
+
+        memcpy(prevBlockPtr, temp, copySize);
+        mm_check();
+        return prevBlockPtr;
     }
 
     /* allocate new memory, free old memory */
@@ -307,22 +360,19 @@ void *mm_realloc(void *ptr, size_t size)
 
     void *bp = NextBlockPtr(g_heapList);
 
-    int isReurnedEalier = 0;
     while (1) {
         if (GetSize(bp) == 0 && GetAlloc(bp) == 1) {  // epilogue block
             break;
-        } 
+        }
 
         if (bp == ptr) {
-            isReurnedEalier = 1;
-            DoRealloc(ptr, size);
-            break;
+            return DoRealloc(ptr, size);
         }
 
         bp = NextBlockPtr(bp);
     }
 
-    if (!isReurnedEalier) {
-        printf("ERRPR mm_realloc: ptr(%p) is invalid\n", ptr);
-    }
+    printf("ERRPR mm_realloc: ptr(%p) is invalid\n", ptr);
+    mm_check();
+    return NULL;
 }
