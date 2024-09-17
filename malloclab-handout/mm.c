@@ -238,38 +238,91 @@ void mm_free(void *ptr)
     }
 }
 
+/**
+ * @param ptr: Input will ensure ptr is valid
+ */
+static void *DoRealloc(void *ptr, size_t size)
+{
+    size_t newSize = ALIGN(size + SIZE_T_SIZE);
+    size_t oldSize = GetSize(ptr);
+    if (oldSize == newSize) {
+        return ptr;
+    }
+
+    /* if newSize is less than oldSize, truncate it directly */
+    if (newSize < oldSize) {
+        size_t leftSize = oldSize - newSize;
+        Put(GetFooterPtr(ptr), Pack(leftSize, 0));
+
+        Put(GetHeaderPtr(ptr), Pack(newSize, 1));
+        Put(GetFooterPtr(ptr), Pack(newSize, 1));
+
+        Put(GetHeaderPtr(NextBlockPtr(ptr)), Pack(leftSize, 0));
+
+        Coalesce(NextBlockPtr(ptr));
+        return ptr;
+    }
+
+    size_t extraSize = newSize - oldSize;
+    void *nextBlockPtr = NextBlockPtr(ptr);
+    int nextAlloc = GetAlloc(nextBlockPtr);
+    size_t nextSize = GetSize(nextBlockPtr);
+
+    /* if next block is not allocated and enough to accomodate extraSize, use it directly */
+    if (nextAlloc == 0 && nextSize >= extraSize) {
+        Put(GetFooterPtr(nextBlockPtr), Pack(nextSize - extraSize, 0));
+
+        Put(GetHeaderPtr(ptr), Pack(newSize, 1));
+        Put(GetFooterPtr(ptr), Pack(newSize, 1));
+
+        Put(GetHeaderPtr(NextBlockPtr(ptr)), Pack(nextSize - extraSize, 0));
+        return ptr;
+    }
+
+    /* allocate new memory, free old memory */
+    size_t copySize = oldSize - SIZE_T_SIZE;
+    void *newPtr = mm_malloc(size);
+    if (newPtr == NULL) {
+        printf("DoRealloc failed\n");
+        return NULL;
+    }
+
+    memcpy(newPtr, ptr, copySize);
+    mm_free(ptr);
+    return newPtr;
+}
+
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    
-    newptr = mm_malloc(size);
-    if (newptr == NULL) {
+    if (ptr == NULL) {
+        return mm_malloc(size);
+    }
+    if (size == 0) {
+        mm_free(ptr);
         return NULL;
     }
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize){
-        copySize = size;
+
+    void *bp = NextBlockPtr(g_heapList);
+
+    int isReurnedEalier = 0;
+    while (1) {
+        if (GetSize(bp) == 0 && GetAlloc(bp) == 1) {  // epilogue block
+            break;
+        } 
+
+        if (bp == ptr) {
+            isReurnedEalier = 1;
+            DoRealloc(ptr, size);
+            break;
+        }
+
+        bp = NextBlockPtr(bp);
     }
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+
+    if (!isReurnedEalier) {
+        printf("ERRPR mm_realloc: ptr(%p) is invalid\n", ptr);
+    }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
