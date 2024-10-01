@@ -257,7 +257,6 @@ static inline char GetOperation(char *line, size_t size)
     return line[1];
 }
 
-//  S 18,1
 /**
  * @param buffer[output]
  */
@@ -389,6 +388,9 @@ int main(int argc, char *argv[])
     }
 
     FreeCache(&g_cache);
+    if (file != NULL) {
+        fclose(file);
+    }
 
     printSummary(result.hits, result.missed, result.evictions);
     return 0;
