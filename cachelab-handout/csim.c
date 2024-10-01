@@ -12,12 +12,15 @@
 #define LINE_SIZE 256
 #define BUFFER_SIZE 256
 
-
 /**
  * write miss strategy: load memory into cache
- * 
  * 用 csim-ref 试一下写失效，先写内存，再读这个内存，会发现读内存没有 cache miss，
  * 这说明 csim-res 用的是 write-allocate strategy，即写操作cache miss时，会把内存中的先数据写入缓存中
+ *
+ *
+ * For this this lab, you should assume that memory accesses are aligned properly, such that a single
+ * memory access never crosses block boundaries. By making this assumption, you can ignore the
+ * request sizes in the valgrind traces.
  */
 
 int g_verbose = 0;
@@ -57,7 +60,6 @@ static u_int64_t Get_S_Mask(u_int64_t addr, CacheParameter *cacheParameter)
 
 typedef struct CacheLine {
     char valid;  // 0 or 1
-    char dirty;  // 0 or 1
     u_int64_t tag;
     struct CacheLine *next;
     struct CacheLine *prev;
@@ -281,14 +283,14 @@ static void GetAddress(char *line, size_t size, char *buffer, size_t bufferSize)
 static int GetSetsIdx(char *address, size_t size, CacheParameter *parameter)
 {
     assert(parameter != NULL);
-    u_int64_t addr = atoll(address);
+    u_int64_t addr = strtol(address, NULL, 16);
     u_int64_t s_mask = Get_S_Mask(addr, parameter);
     return (s_mask & addr) >> parameter->b;
 }
 
 static u_int64_t GetTag(char *address, size_t size, CacheParameter *parameter)
 {
-    u_int64_t addr = atoll(address);
+    u_int64_t addr = strtol(address, NULL, 16);
     return addr >> (parameter->s + parameter->b);
 }
 
@@ -305,17 +307,15 @@ static void ProcessLOperation(char *line, size_t size, Cache *cache, Result *res
 
     u_int64_t tag = GetTag(address, BUFFER_SIZE, parameter);
 
+    if (g_verbose == 1) {
+        printf("setdIdx = %d, tag = %ld\n", setsIdx, tag);
+    }
     AccessCacheLine(cachePerSet, tag, result);
 }
 
 static void ProcessSOperation(char *line, size_t size, Cache *cache, Result *result, CacheParameter *parameter)
 {
-    assert(line != NULL);
-    assert(cache != NULL);
-    assert(result != NULL);
-    char address[BUFFER_SIZE];
-    GetAddress(line, LINE_SIZE, address, BUFFER_SIZE);
-
+    ProcessLOperation(line, size, cache, result, parameter);
 }
 
 
@@ -373,14 +373,19 @@ int main(int argc, char *argv[])
                 ProcessLOperation(line, LINE_SIZE, &g_cache, &result, &cacheParameter);
                 break;
             case 'S':
+                ProcessSOperation(line, LINE_SIZE, &g_cache, &result, &cacheParameter);
                 break;
             case 'M':
+                ProcessLOperation(line, LINE_SIZE, &g_cache, &result, &cacheParameter);
+                ProcessSOperation(line, LINE_SIZE, &g_cache, &result, &cacheParameter);
                 break;
             default:
                 printf("wrong operation: %c\n", operation);
                 exit(1);
         }
-        printf("\n");
+        if (g_verbose) {
+            printf("\n");
+        }
     }
 
     FreeCache(&g_cache);
